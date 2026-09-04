@@ -24,6 +24,8 @@
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-dsh-lib.sh
+. "$FM_BACKEND_LIB_DIR/fm-dsh-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -186,6 +188,13 @@ fm_backend_tmux_classify_process_name() {  # <path> [argv0] -> agent|shell|other
       # which the callers above fold into `ambiguous` rather than `dead`, so a
       # stranger's node pane is never reported as an agent-free pane.
       elif fm_cursor_process_matches "${path:-$argv0}" '' "$argv0"; then
+        printf 'agent'
+      # dsh (v1) also runs as a bare `node` in the pane. Identity comes from
+      # the configured runtime root's bin.js appearing in the process path or
+      # argv[0] (bin/fm-dsh-lib.sh). With no dsh config this is a quiet no-op,
+      # and an unrelated `node` still matches nothing here and stays `other`,
+      # which the callers fold into `ambiguous` rather than `dead`.
+      elif fm_dsh_process_matches "${path:-$argv0}" "$argv0"; then
         printf 'agent'
       else
         printf 'other'

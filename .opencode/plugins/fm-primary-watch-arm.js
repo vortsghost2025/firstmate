@@ -310,7 +310,7 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
 
 async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid) {
   if (child || retryTimer) return;
-  if (!(await sessionOwnsLock(paths))) {
+  if (!(await ensureLockOwned(paths))) {
     setArmStatus("failed");
     surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock\n${reason}`);
     return;
@@ -443,13 +443,45 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
   return armChild;
 }
 
+// Stale-lock reclaim: when state/.lock holds a dead harness pid from a prior
+// session that crashed or was killed, this session cannot arm because the
+// recorded owner is no longer an ancestor of any live process. Mirror the
+// canonical pattern in bin/fm-claude-stop-autoarm.sh: read the lock, fail
+// closed on malformed or competing-live-owner, and only when the holder is
+// dead reclaim through the authoritative fm-lock.sh acquisition path (which
+// holds .lock.acquire serialization and re-verifies publication). Then
+// re-verify actual ownership before arming — never treat "stale" as "owned."
+// sessionOwnsLock() stays a pure ancestry predicate; this wrapper adds the
+// reclaim decision its caller needs. Without this, a prior-session crash
+// leaves the holder pid dead and every later session read-only forever.
+async function ensureLockOwned(paths) {
+  if (await sessionOwnsLock(paths)) return true;
+  let lockPid = "";
+  try {
+    lockPid = readFileSync(`${paths.state}/.lock`, "utf8").trim();
+  } catch {
+    return false; // missing/unreadable lock → fail closed
+  }
+  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return false; // malformed → fail closed
+  // Live holder that is NOT this session → competing owner, fail closed.
+  const alive = await runProcess("ps", ["-p", lockPid]);
+  if (alive.code === 0) return false;
+  // Stale holder → reclaim through authoritative fm-lock.sh, then re-verify.
+  const reclaimed = await runProcess("bash", [`${paths.root}/bin/fm-lock.sh`], {
+    cwd: paths.root,
+    env: { ...process.env, FM_HOME: paths.home, FM_STATE_OVERRIDE: paths.state, FM_ROOT_OVERRIDE: paths.root },
+  });
+  if (reclaimed.code !== 0) return false;
+  return sessionOwnsLock(paths);
+}
+
 async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!sessionID) return { status: "skipped", armChild: null };
   if (!(await isPrimaryRoot(paths.root, paths.home))) return { status: "not-primary", armChild: null };
-  if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
   if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
+  if (!(await ensureLockOwned(paths))) return { status: "read-only", armChild: null };
   return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid) };
 }
 

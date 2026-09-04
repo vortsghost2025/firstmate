@@ -36,6 +36,7 @@ A masking condition may explain why a fault appears only sometimes without being
 Inspect the failing path and a proven path where the intended behavior is known to work.
 Compare their inputs, state transitions, dependencies, timing, and control flow to find the earliest meaningful divergence.
 Inspect relevant history, including blame, commits, migrations, and prior implementations, when it can explain why the paths diverged or which invariant was intended.
+History is origin evidence, never present authority: when a commit message, blame entry, or prior implementation disagrees with the live repository or runtime evidence, the live evidence wins and the report must say so explicitly.
 Do not treat the most recent nearby change as causal without evidence.
 
 Identify the smallest counterfactual that should change the outcome if the leading explanation is true.

@@ -63,7 +63,7 @@ fm_control_verb_allowed() {  # <verb>
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harness_supported() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse) return 0 ;;
+    claude|codex|dsh|opencode|pi|pi-signed|grok|kimi|cursor|muse) return 0 ;;
   esac
   return 1
 }
@@ -87,6 +87,7 @@ fm_control_harness_family() {  # <recorded-harness>
     kimi*) printf 'kimi' ;;
     cursor*) printf 'cursor' ;;
     muse*) printf 'muse' ;;
+    dsh*) printf 'dsh' ;;
     *) return 1 ;;
   esac
 }
@@ -101,7 +102,10 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse) [ "$kind" != secondmate ] || return 1 ;;
+    # muse and dsh are verified crewmate/scout adapters only. A secondmate is a
+    # firstmate instance that needs a primary supervision protocol; dsh v1 is a
+    # headless one-shot CLI with no primary surface, so it is refused loudly.
+    muse|dsh) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -112,6 +116,7 @@ fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
     claude|codex|opencode|pi|pi-signed|kimi|cursor|muse) printf 'Escape' ;;
     grok) printf 'C-c' ;;
+    dsh) return 1 ;;
     *) return 1 ;;
   esac
 }
@@ -122,6 +127,7 @@ fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode) printf '2' ;;
     claude|codex|pi|pi-signed|grok|kimi|cursor|muse) printf '1' ;;
+    dsh) return 1 ;;
     *) return 1 ;;
   esac
 }
@@ -140,6 +146,7 @@ fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) ;;
+    dsh) return 1 ;;
     *) return 1 ;;
   esac
 }
@@ -152,6 +159,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # not within 20 - so a cancellation claim built on it would be unreliable.
     # Normal turn completion is prompt, which is what the busy fold depends on.
     claude|codex|opencode|pi|pi-signed|grok|kimi|cursor) printf 'none' ;;
+    dsh) return 1 ;;
     *) return 1 ;;
   esac
 }
@@ -161,6 +169,9 @@ fm_control_exit_command() {  # <harness>
   case "${1-}" in
     claude|opencode|grok|kimi|cursor|muse) printf '/exit' ;;
     codex|pi|pi-signed) printf '/quit' ;;
+    # dsh v1: headless one-shot runs exit on their own; no verified composer
+    # exit command exists, so refuse rather than invent one.
+    dsh) return 1 ;;
     *) return 1 ;;
   esac
 }

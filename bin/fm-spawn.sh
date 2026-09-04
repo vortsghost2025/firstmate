@@ -104,7 +104,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|muse)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|dsh|opencode|pi|pi-signed|grok|kimi|cursor|muse)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -297,6 +297,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-dsh-lib.sh
+. "$SCRIPT_DIR/fm-dsh-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -1274,6 +1276,28 @@ launch_template() {
     # Its turn-end signal is a globally configured Stop hook plus a guarded
     # per-task worktree token, so no launch placeholder belongs here.
     kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # DSH (DeepSeek Harness) v1: direct CLI, headless one-shot profile only,
+    # scout and ordinary-crew kinds. The executable/runtime pair, DSH home, and
+    # optional child-env file are operator CONFIGURATION under config/
+    # (bin/fm-dsh-lib.sh resolves and validates them; nothing is baked into
+    # source and there is no eval or free-form launch-pair parsing). Provider
+    # and model stay inside DSH's own settings.yaml, so no model/effort flag is
+    # emitted. Credential delivery runs through bin/fm-dsh-env-exec.sh: the
+    # pane command first takes the DSH_HOME/permission/telemetry ENV
+    # assignments (prefixing whatever command follows), then __DSHENVPREFIX__
+    # expands to '<loader> <envfile> -- ' when config/dsh-env exists (or to
+    # nothing when it does not), so the loader inherits only env assignments,
+    # reads KEY=VALUE bytes literally (never sourcing them), and execs the
+    # quoted launch pair. Credential values never appear in argv, meta, status,
+    # reports, or logs. DSH_PERMISSION_MODE=danger-full-access is this
+    # adapter's autonomy control - the exact proven mechanism from Mission 003
+    # qualification: without it the Linux sandbox mounts everything read-only
+    # and headless mode offers no interactive escalation channel, so a worker
+    # that must write its FirstMate report/status deliverables blocks forever.
+    # Like claude's --dangerously-skip-permissions, grok's --always-approve,
+    # and muse's --yolo, it is deliberately baked into the verified template.
+    # DSH_TELEMETRY_DISABLED=1 matches every qualification launch.
+    dsh) printf '%s' 'DSH_HOME=__DSHHOME__ DSH_PERMISSION_MODE=danger-full-access DSH_TELEMETRY_DISABLED=1 __DSHENVPREFIX____DSHLAUNCH__ --profile headless "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     # muse (Muse Code): a positional prompt starts the supervised interactive
     # session. --yolo is the single flag that makes a crewmate pane viable: muse
     # ships approval prompts AND a filesystem/network sandbox ON by default
@@ -1574,6 +1598,20 @@ case "$LAUNCH" in
         exit 1
       }
     fi
+    ;;
+esac
+
+case "$LAUNCH" in
+  *__DSHLAUNCH__*|*__DSHHOME__*|*__DSHENVPREFIX__*)
+    # dsh v1: resolve the configured launch pair, home, and env prefix. Any
+    # validation failure refuses the spawn before endpoint creation, matching
+    # the missing-executable refusal posture of the other adapters.
+    dsh_launch=$(fm_dsh_resolve_launch) || exit 1
+    dsh_home_dir=$(fm_dsh_resolve_home) || exit 1
+    dsh_env_prefix=$(fm_dsh_resolve_env_prefix) || exit 1
+    LAUNCH=${LAUNCH//__DSHLAUNCH__/$dsh_launch}
+    LAUNCH=${LAUNCH//__DSHHOME__/$(shell_quote "$dsh_home_dir")}
+    LAUNCH=${LAUNCH//__DSHENVPREFIX__/$dsh_env_prefix}
     ;;
 esac
 

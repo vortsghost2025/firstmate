@@ -1820,3 +1820,351 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary
+
+# ---------------------------------------------------------------------------
+# fm-primary-watch-arm.js: stale-lock reclaim regression coverage
+# Phase 3 fix — sessionOwnsLock stays a pure predicate; the caller reclaims
+# through the authoritative fm-lock.sh acquisition path, then re-verifies.
+# ---------------------------------------------------------------------------
+
+# A. current-session owned lock -> arm allowed
+test_opencode_watcharm_allows_when_session_owns_lock() {
+  local plugin dir out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  [ -f "$plugin" ] || fail "watch-arm plugin missing"
+  dir="$TMP_ROOT/watcharm-owns-lock"
+  mkdir -p "$dir/state"
+  git init -q "$dir"
+  : > "$dir/state/task1.meta"
+  : > "$dir/AGENTS.md"
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/fm-lock.sh" <<'SH'
+#!/usr/bin/env/bash
+printf '%s\n' "$PPID" > "$FM_STATE_OVERRIDE/.lock" 2>/dev/null
+exit 0
+SH
+  chmod +x "$dir/bin/fm-lock.sh"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env/bash
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+exit 0
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  printf '%s\n' "$$" > "$dir/state/.lock"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$dir" WORKTREE="$dir" node 2>&1 <<EOF
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let promptBody = "";
+const client = { session: { promptAsync: async (r) => { promptBody = r.body.parts.map(p => p.text).join(""); } } };
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.DIRECTORY, worktree: process.env.WORKTREE });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-owns" } } });
+if (promptBody.includes("WATCHER FIRED")) { console.error("unexpected failure: " + promptBody); process.exit(1); }
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "watch-arm must allow arm when session owns the lock"
+  [ -z "$out" ] || fail "unexpected output: $out"
+  pass "watch-arm: arm allowed when current session owns the lock"
+}
+
+# B. stale prior owner -> safely reclaimed -> ownership verified -> arm allowed
+test_opencode_watcharm_reclaims_stale_lock_then_arms() {
+  local plugin dir out status newLock
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  [ -f "$plugin" ] || fail "watch-arm plugin missing"
+  dir="$TMP_ROOT/watcharm-stale-reclaim"
+  mkdir -p "$dir/state"
+  git init -q "$dir"
+  : > "$dir/state/task1.meta"
+  : > "$dir/AGENTS.md"
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/fm-lock.sh" <<'SH'
+#!/usr/bin/env/bash
+printf '%s\n' "$PPID" > "$FM_STATE_OVERRIDE/.lock" 2>/dev/null
+exit 0
+SH
+  chmod +x "$dir/bin/fm-lock.sh"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env/bash
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+exit 0
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  printf '%s\n' "999999" > "$dir/state/.lock"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$dir" WORKTREE="$dir" node 2>&1 <<EOF
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let promptBody = "";
+const client = { session: { promptAsync: async (r) => { promptBody = r.body.parts.map(p => p.text).join(""); } } };
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.DIRECTORY, worktree: process.env.WORKTREE });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-stale" } } });
+if (promptBody.includes("WATCHER FIRED")) { console.error("reclaim failed: " + promptBody); process.exit(1); }
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "watch-arm must reclaim stale lock through fm-lock.sh and arm"
+  [ -z "$out" ] || fail "unexpected output: $out"
+  newLock=$(cat "$dir/state/.lock" 2>/dev/null)
+  [ "$newLock" != "999999" ] || fail "lock was not reclaimed: still holds stale 999999"
+  pass "watch-arm: stale lock safely reclaimed, ownership verified, arm allowed"
+}
+
+# C. live competing owner -> arm denied
+test_opencode_watcharm_denies_when_live_competing_owner() {
+  local plugin dir out status competitorPid lockBefore lockAfter
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  [ -f "$plugin" ] || fail "watch-arm plugin missing"
+  dir="$TMP_ROOT/watcharm-competing"
+  mkdir -p "$dir/state"
+  git init -q "$dir"
+  : > "$dir/state/task1.meta"
+  : > "$dir/AGENTS.md"
+  mkdir -p "$dir/bin"
+  # Track whether fm-lock.sh is called
+  cat > "$dir/bin/fm-lock.sh" <<'SH'
+#!/usr/bin/env/bash
+printf 'CALLED' > "$FM_STATE_OVERRIDE/.lock-called"
+exit 1
+SH
+  chmod +x "$dir/bin/fm-lock.sh"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env/bash
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+exit 0
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  # Start a REAL live competing process
+  (exec -a "opencode-mock" sleep 60) &
+  competitorPid=$!
+  sleep 0.5
+  printf '%s\n' "$competitorPid" > "$dir/state/.lock"
+  lockBefore=$(cat "$dir/state/.lock" 2>/dev/null)
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$dir" WORKTREE="$dir" node 2>&1 <<EOF
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let promptBody = "";
+const client = { session: { promptAsync: async (r) => { promptBody = r.body.parts.map(p => p.text).join(""); } } };
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.DIRECTORY, worktree: process.env.WORKTREE });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-compete" } } });
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "watch-arm must not arm when live competing owner holds lock"
+  [ -z "$out" ] || fail "unexpected output: $out"
+  # Verify lock was NOT stolen (still held by competitor)
+  lockAfter=$(cat "$dir/state/.lock" 2>/dev/null)
+  [ "$lockAfter" = "$lockBefore" ] || fail "live competing lock was stolen: before=$lockBefore after=$lockAfter"
+  [ "$lockAfter" = "$competitorPid" ] || fail "lock changed from live competitor: $lockAfter"
+  # Verify fm-lock.sh was NOT called — live owner means fail closed, no reclaim attempt
+  [ ! -f "$dir/state/.lock-called" ] || fail "fm-lock.sh was called for live competing owner (should fail closed)"
+  pass "watch-arm: arm denied when live competing owner holds lock"
+  # Clean up
+  kill "$competitorPid" 2>/dev/null || true
+}
+
+# G. AFK stale lock: no reclaim, no arm
+test_opencode_watcharm_afk_no_reclaim() {
+  local plugin dir out status lockBefore lockAfter
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  [ -f "$plugin" ] || fail "watch-arm plugin missing"
+  dir="$TMP_ROOT/watcharm-afk-stale"
+  mkdir -p "$dir/state"
+  git init -q "$dir"
+  : > "$dir/state/task1.meta"
+  : > "$dir/AGENTS.md"
+  : > "$dir/state/.afk"
+  mkdir -p "$dir/bin"
+  # Track fm-lock.sh calls
+  cat > "$dir/bin/fm-lock.sh" <<'SH'
+#!/usr/bin/env/bash
+printf 'CALLED' > "$FM_STATE_OVERRIDE/.lock-called"
+exit 0
+SH
+  chmod +x "$dir/bin/fm-lock.sh"
+  # Stale lock
+  printf '%s\n' "999999" > "$dir/state/.lock"
+  lockBefore=$(cat "$dir/state/.lock" 2>/dev/null)
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$dir" WORKTREE="$dir" node 2>&1 <<EOF
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.DIRECTORY, worktree: process.env.WORKTREE });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-afk" } } });
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "watch-arm must not reclaim stale lock in AFK mode"
+  [ -z "$out" ] || fail "unexpected output: $out"
+  # Verify lock was NOT touched
+  lockAfter=$(cat "$dir/state/.lock" 2>/dev/null)
+  [ "$lockAfter" = "$lockBefore" ] || fail "AFK stale lock was modified: before=$lockBefore after=$lockAfter"
+  [ "$lockAfter" = "999999" ] || fail "AFK stale lock was reclaimed: $lockAfter"
+  # Verify fm-lock.sh was NOT called
+  [ ! -f "$dir/state/.lock-called" ] || fail "fm-lock.sh was called in AFK mode (should not be)"
+  pass "watch-arm: AFK stale lock not reclaimed, no arm"
+}
+
+# H. No-supervision stale lock: no reclaim, no arm
+test_opencode_watcharm_no_need_no_reclaim() {
+  local plugin dir out status lockBefore lockAfter
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  [ -f "$plugin" ] || fail "watch-arm plugin missing"
+  dir="$TMP_ROOT/watcharm-noneed-stale"
+  mkdir -p "$dir/state"
+  git init -q "$dir"
+  # NO task1.meta (no supervision need)
+  : > "$dir/AGENTS.md"
+  mkdir -p "$dir/bin"
+  # Track fm-lock.sh calls
+  cat > "$dir/bin/fm-lock.sh" <<'SH'
+#!/usr/bin/env/bash
+printf 'CALLED' > "$FM_STATE_OVERRIDE/.lock-called"
+exit 0
+SH
+  chmod +x "$dir/bin/fm-lock.sh"
+  # Stale lock
+  printf '%s\n' "999999" > "$dir/state/.lock"
+  lockBefore=$(cat "$dir/state/.lock" 2>/dev/null)
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$dir" WORKTREE="$dir" node 2>&1 <<EOF
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.DIRECTORY, worktree: process.env.WORKTREE });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-noneed" } } });
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "watch-arm must not reclaim stale lock when no supervision needed"
+  [ -z "$out" ] || fail "unexpected output: $out"
+  # Verify lock was NOT touched
+  lockAfter=$(cat "$dir/state/.lock" 2>/dev/null)
+  [ "$lockAfter" = "$lockBefore" ] || fail "no-need stale lock was modified: before=$lockBefore after=$lockAfter"
+  [ "$lockAfter" = "999999" ] || fail "no-need stale lock was reclaimed: $lockAfter"
+  # Verify fm-lock.sh was NOT called
+  [ ! -f "$dir/state/.lock-called" ] || fail "fm-lock.sh was called with no supervision need (should not be)"
+  pass "watch-arm: no-supervision stale lock not reclaimed, no arm"
+}
+
+# D. normal ancestry reaching PID 1 does not bypass stale recovery
+test_opencode_watcharm_pid1_ancestry_recovers_stale() {
+  local plugin dir out status newLock
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  [ -f "$plugin" ] || fail "watch-arm plugin missing"
+  dir="$TMP_ROOT/watcharm-pid1-stale"
+  mkdir -p "$dir/state"
+  git init -q "$dir"
+  : > "$dir/state/task1.meta"
+  : > "$dir/AGENTS.md"
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/fm-lock.sh" <<'SH'
+#!/usr/bin/env/bash
+printf '%s\n' "$PPID" > "$FM_STATE_OVERRIDE/.lock" 2>/dev/null
+exit 0
+SH
+  chmod +x "$dir/bin/fm-lock.sh"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env/bash
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+exit 0
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  printf '%s\n' "999999" > "$dir/state/.lock"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$dir" WORKTREE="$dir" node 2>&1 <<EOF
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let promptBody = "";
+const client = { session: { promptAsync: async (r) => { promptBody = r.body.parts.map(p => p.text).join(""); } } };
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.DIRECTORY, worktree: process.env.WORKTREE });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-pid1" } } });
+if (promptBody.includes("WATCHER FIRED")) { console.error("stale recovery should succeed: " + promptBody); process.exit(1); }
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "watch-arm must reclaim stale lock even when ancestry reaches PID 1"
+  [ -z "$out" ] || fail "unexpected output: $out"
+  newLock=$(cat "$dir/state/.lock" 2>/dev/null)
+  [ "$newLock" != "999999" ] || fail "lock was not reclaimed: still holds stale 999999"
+  pass "watch-arm: PID 1 ancestry does not bypass stale-lock recovery"
+}
+
+# E. malformed lock -> fail closed
+test_opencode_watcharm_fails_closed_on_malformed_lock() {
+  local plugin dir out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  [ -f "$plugin" ] || fail "watch-arm plugin missing"
+  dir="$TMP_ROOT/watcharm-malformed"
+  mkdir -p "$dir/state"
+  git init -q "$dir"
+  : > "$dir/state/task1.meta"
+  : > "$dir/AGENTS.md"
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/fm-lock.sh" <<'SH'
+#!/usr/bin/env/bash
+exit 0
+SH
+  chmod +x "$dir/bin/fm-lock.sh"
+  printf '%s\n' "not-a-pid" > "$dir/state/.lock"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$dir" WORKTREE="$dir" node 2>&1 <<EOF
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.DIRECTORY, worktree: process.env.WORKTREE });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-malformed" } } });
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "watch-arm must fail closed on malformed lock"
+  [ -z "$out" ] || fail "unexpected output: $out"
+  pass "watch-arm: malformed lock fails closed (no arm)"
+}
+
+# F. duplicate watcher prevention remains intact
+# Verifies that two session.idle events produce exactly one arm (the second
+# finds `child` already set and returns "existing" without spawning another).
+test_opencode_watcharm_prevents_duplicate_arm() {
+  local plugin dir out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  [ -f "$plugin" ] || fail "watch-arm plugin missing"
+  dir="$TMP_ROOT/watcharm-dedup"
+  mkdir -p "$dir/state"
+  git init -q "$dir"
+  : > "$dir/state/task1.meta"
+  : > "$dir/AGENTS.md"
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/fm-lock.sh" <<'SH'
+#!/usr/bin/env/bash
+printf '%s\n' "$PPID" > "$FM_STATE_OVERRIDE/.lock" 2>/dev/null
+exit 0
+SH
+  chmod +x "$dir/bin/fm-lock.sh"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env/bash
+# Accept --restart (passed by spawnArm via bash -lc)
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+exit 0
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  printf '%s\n' "$$" > "$dir/state/.lock"
+  out=$(NODE_NO_WARNINGS=1 PLUGIN="$plugin" DIRECTORY="$dir" WORKTREE="$dir" node 2>&1 <<EOF
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({ client, directory: process.env.DIRECTORY, worktree: process.env.WORKTREE });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "s1" } } });
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "s2" } } });
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "watch-arm must not error on duplicate idle events"
+  [ -z "$out" ] || fail "unexpected output: $out"
+  pass "watch-arm: duplicate idle events produce exactly one arm"
+}
+
+test_opencode_watcharm_allows_when_session_owns_lock
+test_opencode_watcharm_reclaims_stale_lock_then_arms
+test_opencode_watcharm_denies_when_live_competing_owner
+test_opencode_watcharm_pid1_ancestry_recovers_stale
+test_opencode_watcharm_fails_closed_on_malformed_lock
+test_opencode_watcharm_prevents_duplicate_arm
+test_opencode_watcharm_afk_no_reclaim
+test_opencode_watcharm_no_need_no_reclaim

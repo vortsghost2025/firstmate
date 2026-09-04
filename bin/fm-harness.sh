@@ -29,6 +29,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-dsh-lib.sh
+. "$SCRIPT_DIR/fm-dsh-lib.sh"
 
 detect_own() {
   # Layer 1: environment markers for verified harnesses.
@@ -106,6 +108,15 @@ detect_own() {
           *" pi "*|*/pi) echo pi; return ;;
         esac ;;
     esac
+    # dsh (v1) is recognized structurally: the configured runtime root's
+    # bin.js inside the interpreter's args. Config absence makes this a quiet
+    # no-op, so machines without dsh keep today's verdicts byte-for-byte, and
+    # an unrelated bare node never matches (bin/fm-dsh-lib.sh). args is only
+    # set on the bare-interpreter branch, so default it for set -u callers.
+    if fm_dsh_process_matches "${args:-}"; then
+      echo dsh
+      return
+    fi
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     if [ -z "$pid" ] || [ "$pid" -le 1 ]; then
       break

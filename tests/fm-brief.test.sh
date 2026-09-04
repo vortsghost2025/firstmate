@@ -762,6 +762,49 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# The T1 wording pack (advisor/input-gap, evidence-by-exercising, chunked report
+# writes, dependency/CI/config enumeration) reaches workers as scaffold words:
+# ship and scout scaffolds must carry them; the secondmate charter must not pick
+# them up, because they govern task workers, not persistent supervisors.
+test_worker_briefs_carry_word_pack() {
+  local home id brief
+  home="$TMP_ROOT/wordpack-home"
+  mkdir -p "$home/data"
+
+  id="brief-wordpack-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "ship scaffold exited non-zero"
+  brief="$home/data/$id/brief.md"
+  assert_grep 'INPUT GAP: <what is missing>' "$brief" \
+    "ship brief missing the INPUT GAP lane"
+  assert_grep "Prove behavior claims by exercising the real thing" "$brief" \
+    "ship brief missing the exercised-evidence rule"
+  assert_grep "dependency manifest, CI configuration, or other config/build file" "$brief" \
+    "ship brief missing the dependency/CI/config enumeration line"
+  assert_no_grep "VERDICT / TOP RISKS" "$brief" \
+    "ship brief must not import the review-format line (that proposal was rejected)"
+
+  id="brief-wordpack-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1 \
+    || fail "scout scaffold exited non-zero"
+  brief="$home/data/$id/brief.md"
+  assert_grep 'INPUT GAP: <what is missing>' "$brief" \
+    "scout brief missing the INPUT GAP lane"
+  assert_grep "Prove behavior claims by exercising the real thing" "$brief" \
+    "scout brief missing the exercised-evidence clause"
+  assert_grep "small sequential appends - one section at a time - never as one very large single write" "$brief" \
+    "scout brief missing the chunked-report write rule"
+
+  id="brief-wordpack-secondmate"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='x' \
+    "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "secondmate scaffold exited non-zero"
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "INPUT GAP" "$brief" \
+    "secondmate charter must not gain the worker instance rules"
+  pass "fm-brief.sh: worker briefs carry the T1 word pack; secondmate charter untouched"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -783,3 +826,4 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_worker_briefs_carry_word_pack

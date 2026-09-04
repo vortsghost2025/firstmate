@@ -358,12 +358,17 @@ The report is the only thing that survives, so anything worth keeping must be in
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. If an input this brief assumes is missing or contradictory, flag it once as \`INPUT GAP: <what is missing>\`
+   at the top of your report and proceed on the most faithful reading available; never invent the input
+   and never stall silently.
 
 $INBOX_SECTION
 
 # Definition of done
 Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
+Prove behavior claims by exercising the real thing - run the command, read the output, cite the line; a prose claim without that evidence is not evidence.
+Write the report in small sequential appends - one section at a time - never as one very large single write.
 If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
@@ -437,6 +442,13 @@ $RULE1
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs. On ANY no-mistakes
    daemon error, append \`blocked: {the daemon error}\` and stop; only firstmate manages the daemon.
+8. If an input this brief assumes is missing or contradictory, flag it once as \`INPUT GAP: <what is missing>\`
+   in your status line and proceed on the most faithful reading available; never invent the input
+   and never stall silently on it.
+9. Prove behavior claims by exercising the real thing: run the command, read the output, cite the line.
+   A prose claim without that exercised evidence is not evidence.
+10. When your change touches a dependency manifest, CI configuration, or other config/build file,
+    enumerate each such edit explicitly in your result summary and note how it serves the brief.
 
 $INBOX_SECTION
 
