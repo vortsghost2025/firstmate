@@ -1,105 +1,87 @@
 #!/usr/bin/env bash
-# bin/fm-proof-lib.sh - the read-only evaluators that fm-proof-run.sh calls.
+# bin/fm-proof-lib.sh - bounded evaluators and evidence writer for fm-proof-run.sh.
 #
-# Every function here is a pure reader; none write anywhere, all fail closed.
-#
-# Result vocabulary (one printf-on-stdout, exit status carries the verdict):
-#   PASS  -> the expected condition matched observed reality exactly
-#   FAIL  - the expected condition is contradicted by observed reality
-#   UNKNOWN - could not verify either way; never a synthetic pass
-#
-# The print format is exactly two tab-separated fields on one line:
-#   <VERDICT>\t<one-line observation>
+# Every function here is read-only. None of them write anything besides the
+# task's own proof.log under a properly validated state dir. Verdicts are
+# reported through exit codes exactly: 0=PASS 1=FAIL 2=UNKNOWN.
 set -u
 
-# fm_proof_eval_file_exists <path>
-fm_proof_eval_file_exists() {
+FM_PROOF_VERIFIER=${FM_PROOF_VERIFIER:-fm-proof-run-v1}
+
+# --- evaluator surface -------------------------------------------------------
+
+fm_proof_eval_file_exists() {  # <path>
   local path=$1
-  if [ -e "$path" ]; then
-    printf 'PASS\t%s\n' "file exists: $path"
-    return 0
-  fi
-  printf 'FAIL\t%s\n' "file absent: $path"
+  [ -e "$path" ] && { printf 'PASS\tfile exists\n'; return 0; }
+  printf 'FAIL\tfile does not exist\n'
   return 1
 }
 
-# fm_proof_eval_file_absent <path>
-fm_proof_eval_file_absent() {
+fm_proof_eval_file_absent() {  # <path>
   local path=$1
-  if [ -e "$path" ]; then
-    printf 'FAIL\t%s\n' "file exists: $path"
-    return 1
-  fi
-  printf 'PASS\t%s\n' "file absent: $path"
-  return 0
-}
-
-# fm_proof_eval_exact_text <path> <expected-content>
-fm_proof_eval_exact_text() {
-  local path=$1 want=$2
-  if [ ! -e "$path" ]; then
-    printf 'UNKNOWN\t%s\n' "file missing: $path"
-    return 2
-  fi
-  if [ ! -r "$path" ]; then
-    printf 'UNKNOWN\t%s\n' "file unreadable: $path"
-    return 2
-  fi
-  local have
-  have=$(cat -- "$path" 2>/dev/null)
-  if [ -z "$have" ]; then
-    printf 'UNKNOWN\t%s\n' "file empty: $path"
-    return 2
-  fi
-  if [ "$have" = "$want" ]; then
-    printf 'PASS\t%s\n' "content matches exactly"
-    return 0
-  fi
-  printf 'FAIL\t%s\n' "content mismatch"
+  [ ! -e "$path" ] && { printf 'PASS\tfile absent\n'; return 0; }
+  printf 'FAIL\tfile is present\n'
   return 1
 }
 
-# fm_proof_eval_regex_match <path> <pattern>
-fm_proof_eval_regex_match() {
-  local path=$1 pattern=$2
-  if [ ! -e "$path" ]; then
-    printf 'UNKNOWN\t%s\n' "file missing: $path"
-    return 2
-  fi
-  if [ ! -s "$path" ]; then
-    printf 'UNKNOWN\t%s\n' "file empty: $path"
-    return 2
-  fi
-  if grep -qE -- "$pattern" "$path" 2>/dev/null; then
-    printf 'PASS\t%s\n' "pattern matched"
-    return 0
-  fi
-  printf 'FAIL\t%s\n' "pattern not found"
+fm_proof_eval_exact_text() {  # <path> <expected-bytes>
+  local path=$1 want=$2 got
+  [ -e "$path" ] || { printf 'UNKNOWN\tfile missing\n'; return 2; }
+  [ -r "$path" ] || { printf 'UNKNOWN\tfile unreadable\n'; return 2; }
+  got=$(cat -- "$path" 2>/dev/null)
+  [ "$got" = "$want" ] && { printf 'PASS\tcontent matches\n'; return 0; }
+  printf 'FAIL\tcontent differs\n'
   return 1
 }
 
-# fm_proof_canon <workspace> <subject>
-# Resolve a declared subject into its canonical in-workspace location. A
-# subject that escapes the workspace (via '..', absolute path, or a symlink
-# that resolves outside) is refused outright; the function's stdout is the
-# canonical path otherwise.
+fm_proof_eval_regex_match() {  # <path> <extended-regex>
+  local path=$1 pat=$2
+  [ -e "$path" ] || { printf 'UNKNOWN\tfile missing\n'; return 2; }
+  [ -s "$path" ] || { printf 'UNKNOWN\tfile empty\n'; return 2; }
+  grep -qE -- "$pat" "$path" 2>/dev/null && { printf 'PASS\tpattern found\n'; return 0; }
+  printf 'FAIL\tno match\n'
+  return 1
+}
+
+# --- canonical-path guard ----------------------------------------------------
+# fm_proof_canon <subject> <workspace-canonical-realpath>
+# Writes the resolved child path to stdout when it's a strict in-workspace path.
+# Refuses outright otherwise (absolute, traversal, external symlink).
 fm_proof_canon() {
-  local subject=$1 workspace=$2
-  printf '%s\n' "$workspace/$subject"
+  local subject=$1 workspace=$2 canon
+  [ -n "$subject" ] || return 1
+  case "$subject" in
+    /*) return 1 ;;                      # absolute input: never a workspace child
+    *..*) return 1 ;;                    # parent traversal: never acceptable
+  esac
+  canon=$(realpath -m -- "$workspace/$subject") || return 1
+  [ "$canon" = "$workspace" ] && return 1
+  case "$canon" in
+    "$workspace"/*) printf '%s\n' "$canon" ;;
+    *) return 1 ;;
+  esac
 }
 
+# --- evidence writer ----------------------------------------------------------
 # fm_proof_write_row <state-dir> <task-id> <verdict> <proof-id> <type> <note>
-# Append one evidence row to the per-task proof log. The log lives under
-# state/, never in the project workspace, so an interrupted sequence never
-# pollutes deliverables.
+# Refuses and returns nonzero unless the destination proves safe: state dir is
+# real and not a symlink, log is never a symlink, and an existing log passes the
+# full private single-link check. A first write creates the log 0600 and then
+# re-validates it before the row lands.
 fm_proof_write_row() {
-  local state=$1 task=$2 verdict=$3 pid=$4 ptype=$5 note=$6
-  local log="$state/$task.proof.log"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$(date -u +%FT%TZ)" \
-    "$task" \
-    "$verdict" \
-    "$pid" \
-    "$ptype" \
-    "$note" >> "$log"
+  local state=$1 id=$2 verdict=$3 proof_id=$4 type=$5 note=$6 ts log dev
+  [ -d "$state" ] || return 1
+  [ ! -L "$state" ] || return 1
+  log="$state/$id.proof.log"
+  [ ! -L "$log" ] || return 1
+  dev=$(fm_pr_file_device "$state") || return 1
+  if [ -e "$log" ]; then
+    fm_pr_private_file_valid "$log" 600 "$dev" || return 1
+  else
+    ( umask 077 && : >"$log" ) || return 1
+    chmod 600 "$log" 2>/dev/null || { rm -f -- "$log"; return 1; }
+    fm_pr_private_file_valid "$log" 600 "$dev" || { rm -f -- "$log"; return 1; }
+  fi
+  ts=$(date -u +%FT%TZ)
+  printf '%s\t%s\t%s\t%s\t%s\n' "$ts" "$verdict" "$proof_id" "$type" "$note" >>"$log"
 }
