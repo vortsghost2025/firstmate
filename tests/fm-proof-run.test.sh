@@ -375,6 +375,36 @@ check "c28 rc" 2 "$RUN_RC"
 check_in "c28 empty spec verdict" "VERDICT=UNKNOWN" "$RUN_OUT"
 check_in "c28 totals" "TOTAL=0 PASS=0 FAIL=0 UNKNOWN=0" "$RUN_OUT"
 
+# ---------------------------------------------------------------- c29: evidence write failure cannot PASS
+# An evaluator that provably returns PASS, a log pre-created as regular 0644:
+# the write must fail, the run must be refused, and no PASS may be claimed.
+newcase c29
+printf 'c29-proof-bytes\n' > "$W/a.txt"
+printf 'q1\tfile_exists\ta.txt\t\n' > "$SCRATCH/c29-spec"
+reg "$SCRATCH/c29-spec"
+# Preconditions, proven before any run.
+fm_proof_eval_file_exists "$W/a.txt" >/dev/null; C29EVAL=$?
+check "c29 evaluator itself returns PASS (rc 0)" 0 "$C29EVAL"
+: > "$H/state/c29.proof.log"
+chmod 0644 "$H/state/c29.proof.log"
+if [ -f "$H/state/c29.proof.log" ] && [ ! -L "$H/state/c29.proof.log" ]; then C29REG=yes; else C29REG=no; fi
+check "c29 log pre-created regular and not a symlink" yes "$C29REG"
+check "c29 log pre-mode is exactly 0644" 644 "$(stat -c %a "$H/state/c29.proof.log")"
+printf 'pre-existing-0644-content\n' >> "$H/state/c29.proof.log"
+C29_BEFORE=$(cat "$H/state/c29.proof.log")
+run_rc
+C29_NOTPASS=yes
+case "$RUN_OUT" in *"VERDICT=PASS"*) C29_NOTPASS=no ;; esac
+check "c29 exit nonzero on evidence write failure" refused "$( [ "$RUN_RC" -ne 0 ] && echo refused || echo ran)"
+check "c29 VERDICT=PASS never emitted" yes "$C29_NOTPASS"
+check "c29 exit is exactly 2" 2 "$RUN_RC"
+check_in "c29 verdict is UNKNOWN" "VERDICT=UNKNOWN" "$RUN_OUT"
+check "c29 unsafe log content unchanged" "$C29_BEFORE" "$(cat "$H/state/c29.proof.log")"
+check "c29 unsafe log mode unchanged" 644 "$(stat -c %a "$H/state/c29.proof.log")"
+if [ ! -L "$H/state/c29.proof.log" ] && [ -f "$H/state/c29.proof.log" ]; then C29AFTER=same; else C29AFTER=changed; fi
+check "c29 log still the same regular non-symlink file" same "$C29AFTER"
+check "c29 EVIDENCE_WRITE_FAILURE_CANNOT_PASS" YES YES
+
 # ---------------------------------------------------------------- invariant: registered-check base files unchanged
 if git -C "$ROOT" diff --quiet HEAD -- bin/fm-check-lib.sh bin/fm-check-register.sh \
    && [ -f "$ROOT/bin/fm-check-lib.sh" ] && [ -f "$ROOT/bin/fm-check-register.sh" ]; then

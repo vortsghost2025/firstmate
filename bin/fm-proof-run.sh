@@ -81,13 +81,22 @@ while IFS= read -r line || [ -n "$line" ]; do
   IFS=$'\t' read -r proof_id type subject expected <<< "$line"
   if [ -z "$proof_id" ] || [ -z "$type" ] || [ -z "$subject" ]; then
     printf 'UNKNOWN\tmalformed proof line\n'
-    fm_proof_write_row "$STATE" "$TASK_ID" UNKNOWN "${proof_id:--}" "${type:--}" "malformed proof line"
+    # Evidence first: only an actually-persisted row may be accounted.
+    fm_proof_write_row "$STATE" "$TASK_ID" UNKNOWN "${proof_id:--}" "${type:--}" "malformed proof line" || {
+      printf 'refused: evidence write failed for malformed row; refusing to continue\n' >&2
+      printf 'VERDICT=UNKNOWN\n'
+      exit 2
+    }
     unknown=$((unknown + 1))
     continue
   fi
   if ! canon=$(fm_proof_canon "$subject" "$TRUST_CANON"); then
     printf 'UNKNOWN\tpath escape refused: %s\n' "$subject"
-    fm_proof_write_row "$STATE" "$TASK_ID" UNKNOWN "$proof_id" "$type" "escape refused: $subject"
+    fm_proof_write_row "$STATE" "$TASK_ID" UNKNOWN "$proof_id" "$type" "escape refused: $subject" || {
+      printf 'refused: evidence write failed for escape row; refusing to continue\n' >&2
+      printf 'VERDICT=UNKNOWN\n'
+      exit 2
+    }
     unknown=$((unknown + 1))
     continue
   fi
@@ -103,12 +112,23 @@ while IFS= read -r line || [ -n "$line" ]; do
       rc=2 ;;   # unknown types: UNKNOWN, never PASS
   esac
   case "$rc" in
-    0) verdict=PASS;    pass=$((pass + 1)) ;;
-    1) verdict=FAIL;    fail=$((fail + 1)) ;;
-    *) verdict=UNKNOWN; unknown=$((unknown + 1)) ;;
+    0) verdict=PASS ;;
+    1) verdict=FAIL ;;
+    *) verdict=UNKNOWN ;;
   esac
   printf '%s\t%s\n' "$verdict" "$proof_id"
-  fm_proof_write_row "$STATE" "$TASK_ID" "$verdict" "$proof_id" "$type" "$subject"
+  # A proof only counts once its evidence row is durably persisted. If the
+  # write fails this run can never claim PASS; classify everything UNKNOWN.
+  fm_proof_write_row "$STATE" "$TASK_ID" "$verdict" "$proof_id" "$type" "$subject" || {
+    printf 'refused: evidence write failed for proof %s; refusing to continue\n' "$proof_id" >&2
+    printf 'VERDICT=UNKNOWN\n'
+    exit 2
+  }
+  case "$verdict" in
+    PASS)    pass=$((pass + 1)) ;;
+    FAIL)    fail=$((fail + 1)) ;;
+    UNKNOWN) unknown=$((unknown + 1)) ;;
+  esac
 done < "$SPEC"
 
 printf 'TOTAL=%d PASS=%d FAIL=%d UNKNOWN=%d\n' "$total" "$pass" "$fail" "$unknown"
