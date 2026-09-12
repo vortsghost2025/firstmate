@@ -37,6 +37,8 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
+# A superseded task (state/<id>.superseded, see bin/fm-supersede.sh) is refused
+# the same way: its evidence is preserved, never cleaned up.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -279,6 +281,14 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+# A superseded task is terminally closed with its evidence preserved: refuse
+# worktree/meta/inbox/branch removal while the marker exists (contract:
+# bin/fm-supersede.sh, recognized by bin/fm-classify-lib.sh). There is no
+# --force escape; this guard sits before every destructive path below.
+if fm_task_is_superseded "$STATE" "$ID"; then
+  echo "error: teardown refused: task $ID is superseded - evidence preserved, nothing was changed (see bin/fm-supersede.sh)" >&2
+  exit 1
+fi
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)

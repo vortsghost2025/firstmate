@@ -185,6 +185,41 @@ status_is_paused_or_captain_held() {  # <status-line>
   status_is_paused "$line" || status_is_captain_held "$line"
 }
 
+# --- superseded task state --------------------------------------------------
+#
+# SUPERSEDED is a marker state, not a status verb: there is deliberately no
+# `superseded:` log verb beside the done|needs-decision|blocked|failed and
+# paused verbs above. The terminal state rides entirely on the marker file
+# below, so closing a task appends no status line (no new signal wake) and the
+# preserved status log stays byte-stable. A superseded task keeps its
+# state/<id>.meta, status log, and inbox; its backlog row is Done with its
+# links kept. This library owns RECOGNITION only (the marker path and the
+# predicate); bin/fm-supersede.sh owns the transition mechanics that create
+# the marker. Consumers: bin/fm-crew-state.sh reports a done-like terminal,
+# bin/fm-watch.sh emits no further stale wakes, bin/fm-teardown.sh refuses
+# removal.
+# The marker suffix below follows the same override idiom as the verb
+# constants above: FM_CLASSIFY_SUPERSEDED_SUFFIX wins when a home sets it.
+FM_CLASSIFY_SUPERSEDED_SUFFIX_DEFAULT='.superseded'
+
+# The marker path for a task's superseded state. Pure string construction, no
+# filesystem reads, so callers can derive the path before deciding to create it.
+fm_superseded_marker_path() {  # <state-dir> <id>
+  printf '%s/%s%s\n' "$1" "$2" "${FM_CLASSIFY_SUPERSEDED_SUFFIX:-$FM_CLASSIFY_SUPERSEDED_SUFFIX_DEFAULT}"
+}
+
+# 0 when <id> carries a superseded marker in <state-dir>: a regular file, never
+# a symlink. The id charset matches the task-identity rule so a crafted id can
+# never escape the state directory through this predicate.
+fm_task_is_superseded() {  # <state-dir> <id>
+  local state=$1 id=${2-} marker
+  case "$id" in
+    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  marker=$(fm_superseded_marker_path "$state" "$id")
+  [ -f "$marker" ] && [ ! -L "$marker" ]
+}
+
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins

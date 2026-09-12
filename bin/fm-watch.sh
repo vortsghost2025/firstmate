@@ -1513,6 +1513,19 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    # A superseded task is terminally closed with its evidence preserved: it
+    # emits no further stale wakes and never resurfaces through the
+    # declared-pause cadence (contract: bin/fm-supersede.sh, recognized by
+    # bin/fm-classify-lib.sh's fm_task_is_superseded). This runs before
+    # inbox_steer_check because no worker remains to ack a steer, and before
+    # every stale branch below so neither the wedge timer nor
+    # handle_paused_stale can ever reach it. Pause tracking is cleared so a
+    # pre-closure resurface marker cannot fire afterwards.
+    if [ -n "$task" ] && fm_task_is_superseded "$STATE" "$task"; then
+      clear_pause_tracking "$(window_key "$w")"
+      triage_log "absorbed stale (superseded, evidence preserved): $w"
+      continue
+    fi
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"

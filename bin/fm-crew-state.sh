@@ -94,6 +94,17 @@ emit() {  # <state> <source> [detail]
 
 [ -f "$META" ] || emit unknown none "no metadata for $ID"
 
+# A superseded task is terminally closed with its evidence preserved: report a
+# done-like terminal without consulting the run-step, pane, or status log, so
+# supervisors read the closure and not a stale pre-closure event. The marker
+# and its recognition rule are owned by bin/fm-supersede.sh and
+# bin/fm-classify-lib.sh; this is only the read side.
+if fm_task_is_superseded "$STATE" "$ID"; then
+  SUPERSEDED_NOTE=$(sed -n 's/^reason=//p' "$STATE/$ID.superseded" 2>/dev/null | tail -1)
+  [ -n "$SUPERSEDED_NOTE" ] || SUPERSEDED_NOTE="superseded - evidence preserved"
+  emit "done" superseded "$SUPERSEDED_NOTE"
+fi
+
 meta_value() {  # <key>
   grep "^$1=" "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
